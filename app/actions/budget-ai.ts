@@ -2,95 +2,103 @@
 
 import { groq } from "@ai-sdk/groq"
 import { generateText } from "ai"
+import { createBudgetAnalysisPrompt, type BudgetData, type AIRecommendation } from "@/lib/groq-prompts"
 
-export interface BudgetData {
-  income: number
-  fixedExpenses: Array<{
-    category: string
-    amount: number
-  }>
-  goals: Array<{
-    category: string
-    target_percent: number
-  }>
-  remainingIncome?: number
-  totalFixedExpenses?: number
-}
-
-export interface AIRecommendation {
-  budgetPlan: {
-    category: string
-    amount: number
-    percent: number
-    reasoning: string
-  }[]
-  insights: string[]
-  warnings: string[]
-  summary: string
-}
+export type { BudgetData, AIRecommendation }
 
 export async function getAIBudgetRecommendations(budgetData: BudgetData): Promise<AIRecommendation> {
-  // Calculate some values to help the AI
-  const totalFixedExpenses = budgetData.fixedExpenses.reduce((sum, expense) => sum + expense.amount, 0)
-  const remainingIncome = budgetData.income - totalFixedExpenses
-
-  // Prepare the prompt with all the budget information
-  const prompt = `
-    You are an AI financial advisor specializing in personal budget optimization.
-    
-    USER'S FINANCIAL INFORMATION:
-    - Monthly Income: $${budgetData.income}
-    - Total Fixed Expenses: $${totalFixedExpenses}
-    - Remaining Income: $${remainingIncome}
-    
-    FIXED EXPENSES:
-    ${budgetData.fixedExpenses.map((expense) => `- ${expense.category}: $${expense.amount}`).join("\n")}
-    
-    FINANCIAL GOALS:
-    ${budgetData.goals.map((goal) => `- ${goal.category}: ${goal.target_percent}% of income`).join("\n")}
-    
-    Based on this information, provide:
-    1. An optimized budget plan with specific allocations for each category
-    2. Key insights about their financial situation
-    3. Warnings if any goals are unrealistic or if there are potential issues
-    4. A brief summary of the overall budget health
-    
-    Format your response as a JSON object with the following structure:
-    {
-      "budgetPlan": [
-        {
-          "category": "Category name",
-          "amount": 123.45,
-          "percent": 12.3,
-          "reasoning": "Brief explanation for this allocation"
-        }
-      ],
-      "insights": ["Insight 1", "Insight 2"],
-      "warnings": ["Warning 1", "Warning 2"],
-      "summary": "Overall budget summary"
-    }
-    
-    Only return the JSON object, nothing else.
-  `
-
   try {
-    // Generate text using the Groq model
+    const prompt = createBudgetAnalysisPrompt(budgetData)
+
     const { text } = await generateText({
       model: groq("llama3-70b-8192"),
       prompt,
-      temperature: 0.3,
-      maxTokens: 2048,
+      temperature: 0.1,
+      maxTokens: 1500,
     })
 
-    // Parse the JSON response
-    return JSON.parse(text) as AIRecommendation
+    // Import utilities dynamically to avoid circular imports
+    const { cleanAndValidateJSON, validateAIRecommendation, createFallbackRecommendation } = await import(
+      "@/lib/groq-prompts"
+    )
+
+    // Clean and parse the response
+    const cleanedText = cleanAndValidateJSON(text)
+    const recommendation = JSON.parse(cleanedText)
+
+    // Validate the structure
+    if (!validateAIRecommendation(recommendation)) {
+      throw new Error("Invalid recommendation structure")
+    }
+
+    // Ensure numeric values are properly formatted
+    recommendation.budgetPlan = recommendation.budgetPlan.map((item: any) => ({
+      category: String(item.category || "Miscellaneous"),
+      amount: Number(item.amount) || 0,
+      percent: Number(item.percent) || 0,
+      reasoning: String(item.reasoning || "Budget allocation"),
+    }))
+
+    return recommendation as AIRecommendation
   } catch (error) {
     console.error("Error getting AI budget recommendations:", error)
+
+    // Import fallback function
+    const { createFallbackRecommendation } = await import("@/lib/groq-prompts")
+
+    return createFallbackRecommendation(budgetData, error instanceof Error ? error.message : "Unknown error occurred")
+  }
+}
+
+/**
+ * Additional AI helper functions using our prompt system
+ */
+
+export async function getQuickFinancialTips(budgetData: BudgetData): Promise<string[]> {
+  try {
+    const { createQuickTipsPrompt } = await import("@/lib/groq-prompts")
+    const prompt = createQuickTipsPrompt(budgetData)
+
+    const { text } = await generateText({
+      model: groq("llama3-70b-8192"),
+      prompt,
+      temperature: 0.4,
+      maxTokens: 512,
+    })
+
+    return JSON.parse(text) as string[]
+  } catch (error) {
+    console.error("Error getting quick tips:", error)
+    return [
+      "Track your expenses for a week to identify spending patterns",
+      "Set up automatic transfers to your savings account",
+      "Review and negotiate your recurring subscriptions",
+    ]
+  }
+}
+
+export async function validateFinancialGoals(
+  income: number,
+  goals: Array<{ category: string; target_percent: number }>,
+) {
+  try {
+    const { createGoalValidationPrompt } = await import("@/lib/groq-prompts")
+    const prompt = createGoalValidationPrompt(income, goals)
+
+    const { text } = await generateText({
+      model: groq("llama3-70b-8192"),
+      prompt,
+      temperature: 0.2,
+      maxTokens: 1024,
+    })
+
+    return JSON.parse(text)
+  } catch (error) {
+    console.error("Error validating goals:", error)
     return {
-      budgetPlan: [],
-      insights: ["Unable to generate AI recommendations at this time."],
-      warnings: [],
-      summary: "Please try again later.",
+      feasible: true,
+      issues: [],
+      recommendations: ["Please review your goals and try again"],
     }
   }
 }
